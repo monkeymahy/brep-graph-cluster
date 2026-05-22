@@ -1,0 +1,19 @@
+name: brep-graph
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - h5py
+  - tqdm
+  - networkx
+  - pythonocc-core=7.5.1
+  - occt=7.5.1
+  - pip
+  - pip:
+    - torch
+    - dgl
+    - scikit-learn
+    - git+https://github.com/AutodeskAILab/occwl.git
