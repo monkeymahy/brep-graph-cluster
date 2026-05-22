@@ -320,6 +320,30 @@ def save_clustering_result(
     print(f"簇大小分布: {[len(c) for c in clusters]}")
 
 
+def load_from_dir_or_json(input_path: str):
+    """从目录或JSON文件加载数据"""
+    input_path = Path(input_path)
+
+    if input_path.is_dir():
+        print(f"从目录加载图数据: {input_path}")
+        data = []
+        json_files = sorted(input_path.glob("*.json"))
+        print(f"找到 {len(json_files)} 个JSON文件")
+
+        for json_file in tqdm(json_files):
+            try:
+                item = load_json(json_file)
+                data.append(item)
+            except Exception as e:
+                print(f"读取 {json_file} 失败: {e}")
+
+        print(f"已加载 {len(data)} 个图")
+        return data
+    else:
+        print(f"加载图数据: {input_path}")
+        return load_json(input_path)
+
+
 def cluster_from_graphs_json(
     graphs_json_path: str,
     output_dir: str,
@@ -327,16 +351,15 @@ def cluster_from_graphs_json(
     num_workers: int = 1
 ):
     """
-    从 graphs.json 文件加载数据并进行聚簇
+    从 graphs.json 文件或目录加载数据并进行聚簇
 
     Args:
-        graphs_json_path: graphs.json 文件路径
+        graphs_json_path: graphs.json 文件路径或目录
         output_dir: 输出目录
         step_source_dir: STEP 文件源目录
         num_workers: 并行进程数
     """
-    print("加载图数据...")
-    graphs_data = load_json(graphs_json_path)
+    graphs_data = load_from_dir_or_json(graphs_json_path)
 
     print(f"开始聚簇 {len(graphs_data)} 个图...")
     if num_workers > 1:
@@ -351,95 +374,22 @@ def cluster_from_graphs_json(
     return clusters
 
 
-def cluster_step_folder(
-    step_dir: str,
-    output_dir: str,
-    num_workers: int = 1
-):
-    """
-    直接从 STEP 文件夹进行聚簇（先提取 AAG）
-
-    Args:
-        step_dir: STEP 文件目录
-        output_dir: 输出目录
-        num_workers: 并行进程数
-    """
-    from aag_extractor import extract_aag_from_step
-
-    step_dir = Path(step_dir)
-    output_dir = Path(output_dir)
-
-    # 临时目录用于存储提取的 AAG
-    temp_aag_dir = output_dir / "_temp_aag"
-    temp_aag_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. 提取 AAG
-    print("步骤 1: 提取 AAG...")
-    extract_aag_from_step(
-        step_path=str(step_dir),
-        output_path=str(temp_aag_dir),
-        num_workers=num_workers
-    )
-
-    # 2. 聚簇
-    print("\n步骤 2: 图聚簇...")
-    graphs_json = temp_aag_dir / "graphs.json"
-    if not graphs_json.exists():
-        print("未找到 graphs.json，提取可能失败。")
-        return
-
-    cluster_output = output_dir
-    clusters = cluster_from_graphs_json(
-        str(graphs_json),
-        str(cluster_output),
-        step_source_dir=str(step_dir),
-        num_workers=num_workers
-    )
-
-    # 清理临时文件
-    try:
-        shutil.rmtree(temp_aag_dir)
-    except:
-        pass
-
-    return clusters
-
-
 def main():
     parser = argparse.ArgumentParser(description='AAG Graph Clustering using VF2++')
 
-    subparsers = parser.add_subparsers(dest='command', help='可用命令')
-
-    # 从 graphs.json 聚簇
-    from_json_parser = subparsers.add_parser('from-json', help='从 graphs.json 聚簇')
-    from_json_parser.add_argument("--graphs-json", type=str, required=True, help="graphs.json 文件路径")
-    from_json_parser.add_argument("--output", type=str, required=True, help="输出目录")
-    from_json_parser.add_argument("--step-dir", type=str, default=None, help="STEP 文件源目录（用于复制文件）")
-    from_json_parser.add_argument("--num-workers", type=int, default=1, help="并行进程数")
-
-    # 从 STEP 文件夹直接聚簇
-    from_step_parser = subparsers.add_parser('from-step', help='从 STEP 文件夹直接聚簇')
-    from_step_parser.add_argument("--step-dir", type=str, required=True, help="STEP 文件目录")
-    from_step_parser.add_argument("--output", type=str, required=True, help="输出目录")
-    from_step_parser.add_argument("--num-workers", type=int, default=1, help="并行进程数")
+    parser.add_argument("--input", type=str, required=True, help="AAG目录或单个graphs.json文件路径")
+    parser.add_argument("--output", type=str, required=True, help="输出目录")
+    parser.add_argument("--step-dir", type=str, default=None, help="STEP 文件源目录（用于复制文件）")
+    parser.add_argument("--num-workers", type=int, default=1, help="并行进程数")
 
     args = parser.parse_args()
 
-    if args.command == 'from-json':
-        cluster_from_graphs_json(
-            args.graphs_json,
-            args.output,
-            args.step_dir,
-            args.num_workers
-        )
-    elif args.command == 'from-step':
-        cluster_step_folder(
-            args.step_dir,
-            args.output,
-            args.num_workers
-        )
-    else:
-        parser.print_help()
+    cluster_from_graphs_json(
+        args.input,
+        args.output,
+        args.step_dir,
+        args.num_workers
+    )
 
 
 if __name__ == '__main__':

@@ -1,19 +1,9 @@
-name: brep-graph
+name: brep-graph-cluster
 channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
+  - python>=3.9
   - numpy
-  - scipy
-  - h5py
   - tqdm
   - networkx
-  - pythonocc-core=7.5.1
-  - occt=7.5.1
-  - pip
-  - pip:
-    - torch
-    - dgl
-    - scikit-learn
-    - git+https://github.com/AutodeskAILab/occwl.git

@@ -1,123 +1,92 @@
-# B-Rep Graph Match - AAG Extractor
+# AAG 图聚簇
 
-从STEP文件中提取几何属性邻接图(AAG, Attributed Adjacency Graph)的独立模块。
+使用 networkx 的 VF2++ 算法对 AAG JSON 数据进行精确图匹配和聚簇。
 
 ## 安装
 
-### 使用conda创建环境
+```bash
+pip install numpy tqdm networkx
+```
+
+## 快速开始
 
 ```bash
-# 使用提供的environment.yml
-conda env create -f environment.yml
+# 使用大规模版本（推荐）- 支持AAG目录
+python graph_cluster_large.py --input E:\mhy\aagnet\v2\data\SFCAD_4\aag --output .\cluster_result
 
-# 激活环境
-conda activate brep-graph
+# 或从单个graphs.json文件
+python graph_cluster_large.py --input .\graphs.json --output .\cluster_result
+
+# 带STEP文件复制
+python graph_cluster_large.py --input .\aag --output .\cluster_result --step-dir .\steps
+
+# 多进程加速
+python graph_cluster_large.py --input .\aag --output .\cluster_result --num-workers 16
+
+# 跳过文件复制，只生成JSON结果（先看结果）
+python graph_cluster_large.py --input .\aag --output .\cluster_result --skip-copy
 ```
 
-### 或者手动安装
+## 版本说明
 
-```bash
-# 创建环境
-conda create -n brep-graph python=3.10
-conda activate brep-graph
+| 版本 | 文件 | 适用场景 |
+|------|------|----------|
+| 基础版 | `graph_cluster.py` | 小规模数据 (< 1k) |
+| 优化版 | `graph_cluster_fast.py` | 中等规模 (1k-10k) |
+| 大规模版 | `graph_cluster_large.py` | **大规模 (10k+) - 推荐** |
 
-# 安装依赖
-conda install -c conda-forge pythonocc-core=7.5.1 occt=7.5.1 numpy scipy h5py tqdm networkx
-pip install torch dgl scikit-learn
-pip install git+https://github.com/AutodeskAILab/occwl.git
+## 输入数据格式
+
+### 方式1：目录模式（推荐）
+每个文件是一个单独的JSON：
+```
+aag/
+  3211C01001G70.json
+  3211C01001G70__rot_any230p2_00.json
+  ...
 ```
 
-说明：`numba` 在 Windows 下会和 `pythonocc-core=7.5.1` 的 `tbb` 约束冲突，这个项目代码本身也没有直接使用 `numba`，因此不建议放进同一个环境。
-
-## 使用方法
-
-### 命令行使用
-
-```bash
-# 单文件处理
-python -c "
-from aag_extractor import AAGExtractor
-from pathlib import Path
-extractor = AAGExtractor(Path('path/to/your/file.step'))
-result = extractor.process()
-print(result)
-"
-
-# 批量处理
-python aag_extractor.py --step_path ./steps --output ./output --num_workers 4
+### 方式2：单个graphs.json
+```json
+[
+  [
+    "filename_001",
+    {
+      "graph": {"edges": [[0, 0, 1], [1, 2, 2]], "num_nodes": 3},
+      "graph_face_attr": [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
+      "graph_face_grid": [],
+      "graph_edge_attr": [[0.0], [1.0], [0.5]],
+      "graph_edge_grid": []
+    }
+  ]
+]
 ```
 
-### Python API使用
-
-```python
-from pathlib import Path
-from aag_extractor import AAGExtractor, extract_aag_from_step
-from graph_loader import AAGDataset
-
-# 单个文件提取
-extractor = AAGExtractor(Path('example.step'))
-aag = extractor.process()
-print(f"Nodes: {aag['graph']['num_nodes']}")
-print(f"Edges: {len(aag['graph']['edges'][0])}")
-
-# 批量提取
-extract_aag_from_step(
-    step_path='./steps',
-    output_path='./output',
-    num_workers=4
-)
-
-# 加载提取后的图
-dataset = AAGDataset('./output/graphs.json', './output/attr_stat.json')
-sample = dataset[0]
-print(sample['graph'])
-```
-
-## 输出数据结构
-
-```python
-{
-    'graph': {
-        'edges': (src_list, dst_list),  # 边连接关系
-        'num_nodes': N                   # 节点数量（面数）
-    },
-    'graph_face_attr': [...],           # 每个面的属性特征
-    'graph_face_grid': [...],           # 每个面的UV网格（可选）
-    'graph_edge_attr': [...],           # 每条边的属性特征
-    'graph_edge_grid': [...]            # 每条边的UV网格（可选）
-}
-```
-
-### 面属性 (Face Attributes)
-
-- Plane: 是否为平面
-- Cylinder: 是否为圆柱面
-- Cone: 是否为圆锥面
-- SphereFaceAttribute: 是否为球面
-- TorusFaceAttribute: 是否为圆环面
-- FaceAreaAttribute: 面积
-- RationalNurbsFaceAttribute: 是否为有理NURBS曲面
-- FaceCentroidAttribute: 质心坐标(x, y, z)
-
-### 边属性 (Edge Attributes)
-
-- Concave edge: 是否为凹边
-- Convex edge: 是否为凸边
-- Smooth: 是否为光滑边
-- EdgeLengthAttribute: 边长
-- CircularEdgeAttribute: 是否为圆弧
-- ClosedEdgeAttribute: 是否为封闭边
-- EllipticalEdgeAttribute: 是否为椭圆边
-- StraightEdgeAttribute: 是否为直线
-- 其他曲线类型属性
-
-## 文件结构
+## 输出目录结构
 
 ```
-.
-├── aag_extractor.py      # AAG提取核心模块
-├── graph_loader.py       # 图数据加载模块
-├── schema.json           # 默认属性定义
-├── environment.yml       # conda环境配置
-└── README.md            # 说明文档
+cluster_result/
+├── clusters.json      # 完整的聚簇信息
+├── file_mapping.json  # 每个文件对应的簇
+├── stats.json         # 统计信息
+├── cluster_0000/      # 第1个簇（最大）
+│   ├── file1.step
+│   └── file2.step
+├── cluster_0001/      # 第2个簇
+├── ...
+└── result/            # 每个簇的代表文件
+    ├── cluster_0000_file1.step
+    └── cluster_0001_file3.step
 ```
+
+## 性能优化
+
+- 多级分桶策略，避免O(n²)全量比较
+- 延迟加载，内存优化
+- 多进程并行处理
+
+| 数据规模 | 预估时间 (16核) | 内存使用 |
+|----------|-----------------|----------|
+| 1k       | < 1 分钟        | < 2GB    |
+| 10k      | 5-15 分钟       | < 8GB    |
+| 60k      | 1-2 小时        | ~32GB    |

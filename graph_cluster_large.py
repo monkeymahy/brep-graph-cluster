@@ -411,14 +411,34 @@ def save_clustering_result(
                     break
 
 
-def load_graphs_in_chunks(graphs_json_path: str, chunk_size: int = 10000, max_count: int = None):
-    """分块加载图数据 - 更省内存"""
-    print(f"加载图数据: {graphs_json_path}")
-    data = load_json(graphs_json_path)
-    if max_count:
-        data = data[:max_count]
-    print(f"已加载 {len(data)} 个图")
-    return data
+def load_graphs_from_dir_or_json(input_path: str, max_count: int = None):
+    """从目录或单个JSON加载图数据"""
+    input_path = Path(input_path)
+
+    if input_path.is_dir():
+        # 目录模式：读取所有JSON文件
+        print(f"从目录加载图数据: {input_path}")
+        data = []
+        json_files = sorted(input_path.glob("*.json"))
+        print(f"找到 {len(json_files)} 个JSON文件")
+
+        for json_file in tqdm(json_files[:max_count] if max_count else json_files):
+            try:
+                item = load_json(json_file)
+                data.append(item)
+            except Exception as e:
+                print(f"读取 {json_file} 失败: {e}")
+
+        print(f"已加载 {len(data)} 个图")
+        return data
+    else:
+        # 单个JSON文件模式
+        print(f"从文件加载图数据: {input_path}")
+        data = load_json(input_path)
+        if max_count:
+            data = data[:max_count]
+        print(f"已加载 {len(data)} 个图")
+        return data
 
 
 def cluster_from_graphs_json(
@@ -429,12 +449,12 @@ def cluster_from_graphs_json(
     max_count: Optional[int] = None,
     skip_copy: bool = False
 ):
-    """从 graphs_json 聚簇"""
+    """从 graphs_json 或目录聚簇"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 加载数据
-    graphs_data = load_graphs_in_chunks(graphs_json_path, max_count=max_count)
+    graphs_data = load_graphs_from_dir_or_json(graphs_json_path, max_count=max_count)
 
     # 聚簇
     clusters = cluster_graphs_large_scale(graphs_data, num_workers)
@@ -448,9 +468,9 @@ def cluster_from_graphs_json(
 
 def main():
     parser = argparse.ArgumentParser(description='AAG Graph Clustering - Ultra Large Scale Version')
-    parser.add_argument("--graphs-json", type=str, required=True, help="graphs.json 文件路径")
+    parser.add_argument("--input", type=str, required=True, help="AAG目录或单个graphs.json文件路径")
     parser.add_argument("--output", type=str, required=True, help="输出目录")
-    parser.add_argument("--step-dir", type=str, default=None, help="STEP 文件源目录")
+    parser.add_argument("--step-dir", type=str, default=None, help="STEP 文件源目录 (可选)")
     parser.add_argument("--num-workers", type=int, default=None, help="并行进程数 (默认: CPU数-1)")
     parser.add_argument("--max-count", type=int, default=None, help="最大处理文件数 (用于测试)")
     parser.add_argument("--skip-copy", action="store_true", help="跳过文件复制，只生成 json 结果")
@@ -458,7 +478,7 @@ def main():
     args = parser.parse_args()
 
     cluster_from_graphs_json(
-        args.graphs_json,
+        args.input,
         args.output,
         args.step_dir,
         args.num_workers,
