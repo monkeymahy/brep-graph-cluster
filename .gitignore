@@ -1,0 +1,12 @@
+# Output directories
+cluster_result/
+test_temp/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
