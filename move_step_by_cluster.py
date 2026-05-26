@@ -44,8 +44,6 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
                 missing_steps.append(fn)
                 continue
             dst_file = cluster_dir / src_file.name
-            if dst_file.exists():
-                continue
             if move_files:
                 shutil.move(str(src_file), str(dst_file))
             else:
@@ -57,8 +55,9 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
         if rep_path is not None:
             dst_name = f"cluster_{cluster_id:04d}_{rep_path.name}"
             dst_path = result_dir / dst_name
-            if not dst_path.exists():
-                shutil.copy2(rep_path, dst_path)
+            if dst_path.exists():
+                continue
+            shutil.copy2(rep_path, dst_path)
         else:
             missing_steps.append(rep_fn)
 
