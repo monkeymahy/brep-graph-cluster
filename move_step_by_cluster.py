@@ -16,12 +16,12 @@ def load_json(path: Path):
         return json.load(fp)
 
 
-def find_step_file(step_dir: Path, stem: str) -> Path:
+def find_step_file(step_dir: Path, stem: str) -> Path | None:
     for ext in STEP_EXTS:
         candidate = step_dir / f"{stem}{ext}"
         if candidate.exists():
             return candidate
-    return Path()
+    return None
 
 
 def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Path, move_files: bool = True) -> None:
@@ -40,7 +40,7 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
 
         for fn in cluster_files:
             src_file = find_step_file(step_dir, fn)
-            if not src_file:
+            if src_file is None:
                 missing_steps.append(fn)
                 continue
             dst_file = cluster_dir / src_file.name
@@ -50,9 +50,9 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
                 shutil.copy2(src_file, dst_file)
 
         rep_path = find_step_file(cluster_dir, rep_fn)
-        if not rep_path:
+        if rep_path is None:
             rep_path = find_step_file(step_dir, rep_fn)
-        if rep_path:
+        if rep_path is not None:
             dst_name = f"cluster_{cluster_id:04d}_{rep_path.name}"
             shutil.copy2(rep_path, result_dir / dst_name)
         else:
