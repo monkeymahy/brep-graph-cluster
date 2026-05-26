@@ -11,19 +11,22 @@ pip install numpy tqdm networkx
 ## 快速开始
 
 ```bash
-# 使用大规模版本（推荐）- 支持AAG目录
+# 使用大规模版本（推荐）- 目录模式会走低内存路径
 python graph_cluster_large.py --input E:\mhy\aagnet\v2\data\SFCAD_4\aag --output .\cluster_result
 
-# 或从单个graphs.json文件
+# 或从单个 graphs.json 文件
 python graph_cluster_large.py --input .\graphs.json --output .\cluster_result
 
-# 带STEP文件复制
+# 带 STEP 文件复制
 python graph_cluster_large.py --input .\aag --output .\cluster_result --step-dir .\steps
+
+# 移动 STEP 文件到簇目录（替代复制）
+python graph_cluster_large.py --input .\aag --output .\cluster_result --step-dir .\steps --move-step
 
 # 多进程加速
 python graph_cluster_large.py --input .\aag --output .\cluster_result --num-workers 16
 
-# 跳过文件复制，只生成JSON结果（先看结果）
+# 跳过文件复制，只生成 JSON 结果（先看结果）
 python graph_cluster_large.py --input .\aag --output .\cluster_result --skip-copy
 ```
 
@@ -90,3 +93,17 @@ cluster_result/
 | 1k       | < 1 分钟        | < 2GB    |
 | 10k      | 5-15 分钟       | < 8GB    |
 | 60k      | 1-2 小时        | ~32GB    |
+
+## STEP 移动/复制说明
+
+- 默认复制 STEP 到簇目录。
+- 需要节省磁盘空间时用 `--move-step` 直接移动。
+- 若希望聚类后再移动（更安全），可用后处理脚本。
+
+```bash
+# 根据 clusters.json 移动 STEP 到簇目录（默认移动）
+python move_step_by_cluster.py --clusters .\cluster_result\clusters.json --step-dir .\steps --output .\cluster_result
+
+# 只复制，不移动
+python move_step_by_cluster.py --clusters .\cluster_result\clusters.json --step-dir .\steps --output .\cluster_result --copy-only
+```

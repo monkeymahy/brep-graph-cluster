@@ -96,8 +96,20 @@ def compute_multi_level_bucket_key(aag_data: Dict) -> Tuple:
     )
 
 
+def _normalize_graph_item(json_path: Path, data: object) -> Tuple[str, Dict]:
+    """规范化单个图数据，兼容 [fn, data] 和纯 data 两种格式"""
+    if (
+        isinstance(data, list)
+        and len(data) == 2
+        and isinstance(data[0], str)
+        and isinstance(data[1], dict)
+    ):
+        return data[0], data[1]
+    return json_path.stem, data  # type: ignore[return-value]
+
+
 def split_into_buckets(graphs_data: List[Tuple[str, Dict]]) -> Dict[Tuple, List[Tuple[str, Dict]]]:
-    """将图分配到多个桶中"""
+    """将图分配到多个桶中（内存模式）"""
     buckets = defaultdict(list)
 
     for fn, data in tqdm(graphs_data, desc="分桶中"):
@@ -105,6 +117,28 @@ def split_into_buckets(graphs_data: List[Tuple[str, Dict]]) -> Dict[Tuple, List[
         buckets[bucket_key].append((fn, data))
 
     return buckets
+
+
+def split_dir_into_buckets(input_dir: Path, max_count: Optional[int] = None) -> Tuple[Dict[Tuple, List[Tuple[str, Path]]], List[str]]:
+    """目录模式分桶：只保留文件路径，避免加载所有图到内存"""
+    buckets: Dict[Tuple, List[Tuple[str, Path]]] = defaultdict(list)
+    failed = []
+
+    json_files = sorted(input_dir.glob("*.json"))
+    if max_count:
+        json_files = json_files[:max_count]
+
+    for json_file in tqdm(json_files, desc="分桶中"):
+        try:
+            data = load_json(json_file)
+            fn, graph_data = _normalize_graph_item(json_file, data)
+            bucket_key = compute_multi_level_bucket_key(graph_data)
+            buckets[bucket_key].append((fn, json_file))
+        except Exception as e:
+            print(f"读取 {json_file} 失败: {e}")
+            failed.append(json_file.stem)
+
+    return buckets, failed
 
 
 # ============================================================================
@@ -163,7 +197,7 @@ def check_isomorphism_pair(data1: Dict, data2: Dict) -> bool:
 
 
 def process_single_bucket_uf(task):
-    """处理单个桶，返回簇映射关系"""
+    """处理单个桶，返回簇映射关系（内存模式）"""
     bucket_items = task
 
     if len(bucket_items) <= 1:
@@ -204,6 +238,67 @@ def process_single_bucket_uf(task):
     for i, fn in enumerate(filenames):
         root = find(i)
         mapping[fn] = filenames[root]
+
+    return mapping
+
+
+def process_single_bucket_uf_files(task):
+    """处理单个桶（文件路径模式），桶内加载，避免常驻内存"""
+    bucket_items = task
+    if len(bucket_items) <= 1:
+        return {fn: fn for fn, _ in bucket_items}
+
+    loaded_items: List[Tuple[str, Dict]] = []
+    failed = []
+    for fn, json_path in bucket_items:
+        try:
+            data = load_json(json_path)
+            _, graph_data = _normalize_graph_item(json_path, data)
+            loaded_items.append((fn, graph_data))
+        except Exception as e:
+            print(f"读取 {json_path} 失败: {e}")
+            failed.append(fn)
+
+    if len(loaded_items) <= 1:
+        mapping = {fn: fn for fn, _ in loaded_items}
+        mapping.update({fn: fn for fn in failed})
+        return mapping
+
+    filenames = [fn for fn, _ in loaded_items]
+    data_list = [data for _, data in loaded_items]
+    n = len(filenames)
+
+    parent = list(range(n))
+
+    def find(u):
+        while parent[u] != u:
+            parent[u] = parent[parent[u]]
+            u = parent[u]
+        return u
+
+    def union(u, v):
+        u_root = find(u)
+        v_root = find(v)
+        if u_root != v_root:
+            parent[v_root] = u_root
+
+    for i in range(n):
+        root_i = find(i)
+        data_i = data_list[i]
+        for j in range(i + 1, n):
+            root_j = find(j)
+            if root_i == root_j:
+                continue
+            if check_isomorphism_pair(data_i, data_list[j]):
+                union(root_i, root_j)
+
+    mapping = {}
+    for i, fn in enumerate(filenames):
+        root = find(i)
+        mapping[fn] = filenames[root]
+
+    for fn in failed:
+        mapping[fn] = fn
 
     return mapping
 
@@ -314,6 +409,64 @@ def cluster_graphs_large_scale(graphs_data: List[Tuple[str, Dict]], num_workers:
     return clusters
 
 
+def cluster_graphs_large_scale_from_dir(input_dir: Path, num_workers: int = None, max_count: Optional[int] = None) -> List[List[str]]:
+    """目录模式聚簇：分桶阶段只保留路径，桶内再加载"""
+    if num_workers is None:
+        num_workers = max(1, cpu_count() - 1)
+
+    json_files = sorted(input_dir.glob("*.json"))
+    if max_count:
+        json_files = json_files[:max_count]
+    total = len(json_files)
+    print(f"开始处理 {total} 个图（目录模式，低内存），使用 {num_workers} 个进程")
+
+    print("\n[1/4] 多级分桶...")
+    buckets, failed = split_dir_into_buckets(input_dir, max_count=max_count)
+    print(f"  分到 {len(buckets)} 个桶")
+
+    if buckets:
+        bucket_sizes = [len(items) for items in buckets.values()]
+        print(f"  桶大小: 最大={max(bucket_sizes)}, 最小={min(bucket_sizes)}, 平均={np.mean(bucket_sizes):.1f}")
+    else:
+        print("  桶大小: 无有效桶")
+
+    work_buckets = [items for items in buckets.values() if len(items) > 1]
+    single_item_buckets = [items for items in buckets.values() if len(items) == 1]
+    print(f"  需要处理的桶: {len(work_buckets)}")
+    print(f"  单图桶: {len(single_item_buckets)} (直接作为独立簇)")
+    if failed:
+        print(f"  读取失败: {len(failed)} 个文件（将作为单图簇）")
+
+    print("\n[2/4] 桶内图比较...")
+    all_mappings = []
+
+    for items in single_item_buckets:
+        fn = items[0][0]
+        all_mappings.append({fn: fn})
+
+    for fn in failed:
+        all_mappings.append({fn: fn})
+
+    if work_buckets:
+        if num_workers == 1:
+            for bucket_items in tqdm(work_buckets, desc="处理桶"):
+                mapping = process_single_bucket_uf_files(bucket_items)
+                all_mappings.append(mapping)
+        else:
+            with Pool(processes=num_workers) as pool:
+                for mapping in tqdm(pool.imap(process_single_bucket_uf_files, work_buckets),
+                                   total=len(work_buckets), desc="处理桶"):
+                    all_mappings.append(mapping)
+
+    print("\n[3/4] 合并簇...")
+    final_mapping = merge_mappings(all_mappings)
+
+    print("\n[4/4] 构建最终簇...")
+    clusters = mapping_to_clusters(final_mapping)
+
+    return clusters
+
+
 # ============================================================================
 # 结果保存
 # ============================================================================
@@ -322,7 +475,8 @@ def save_clustering_result(
     clusters: List[List[str]],
     output_dir: Path,
     step_source_dir: Optional[Path] = None,
-    copy_files: bool = True
+    copy_files: bool = True,
+    move_files: bool = False
 ):
     """保存聚簇结果"""
     output_dir = Path(output_dir)
@@ -389,7 +543,7 @@ def save_clustering_result(
             cluster_dir = output_dir / f"cluster_{idx:04d}"
             cluster_dir.mkdir(exist_ok=True)
 
-            # 复制该簇的文件
+            # 复制/移动该簇的文件
             for fn in cluster:
                 src_file = None
                 for ext in ['.step', '.stp', '.STEP', '.STP']:
@@ -399,12 +553,18 @@ def save_clustering_result(
                         break
 
                 if src_file:
-                    shutil.copy2(src_file, cluster_dir / src_file.name)
+                    dst_file = cluster_dir / src_file.name
+                    if move_files:
+                        shutil.move(str(src_file), str(dst_file))
+                    else:
+                        shutil.copy2(src_file, dst_file)
 
             # 复制代表文件到 result
             rep_fn = cluster[0]
             for ext in ['.step', '.stp', '.STEP', '.STP']:
-                src_file = step_source_dir / f"{rep_fn}{ext}"
+                src_file = cluster_dir / f"{rep_fn}{ext}"
+                if not src_file.exists():
+                    src_file = step_source_dir / f"{rep_fn}{ext}"
                 if src_file.exists():
                     dst_name = f"cluster_{idx:04d}_{src_file.name}"
                     shutil.copy2(src_file, result_dir / dst_name)
@@ -416,7 +576,7 @@ def load_graphs_from_dir_or_json(input_path: str, max_count: int = None):
     input_path = Path(input_path)
 
     if input_path.is_dir():
-        # 目录模式：读取所有JSON文件
+        # 目录模式：读取所有JSON文件（注意：此模式会加载所有图到内存）
         print(f"从目录加载图数据: {input_path}")
         data = []
         json_files = sorted(input_path.glob("*.json"))
@@ -425,7 +585,15 @@ def load_graphs_from_dir_or_json(input_path: str, max_count: int = None):
         for json_file in tqdm(json_files[:max_count] if max_count else json_files):
             try:
                 item = load_json(json_file)
-                data.append(item)
+                if (
+                    isinstance(item, list)
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                    and isinstance(item[1], dict)
+                ):
+                    data.append((item[0], item[1]))
+                else:
+                    data.append((json_file.stem, item))
             except Exception as e:
                 print(f"读取 {json_file} 失败: {e}")
 
@@ -447,21 +615,31 @@ def cluster_from_graphs_json(
     step_source_dir: Optional[str] = None,
     num_workers: Optional[int] = None,
     max_count: Optional[int] = None,
-    skip_copy: bool = False
+    skip_copy: bool = False,
+    move_step: bool = False
 ):
     """从 graphs_json 或目录聚簇"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 加载数据
-    graphs_data = load_graphs_from_dir_or_json(graphs_json_path, max_count=max_count)
-
-    # 聚簇
-    clusters = cluster_graphs_large_scale(graphs_data, num_workers)
+    input_path = Path(graphs_json_path)
+    if input_path.is_dir():
+        # 目录模式：低内存路径
+        clusters = cluster_graphs_large_scale_from_dir(input_path, num_workers, max_count)
+    else:
+        # 文件模式：会占用更多内存
+        graphs_data = load_graphs_from_dir_or_json(graphs_json_path, max_count=max_count)
+        clusters = cluster_graphs_large_scale(graphs_data, num_workers)
 
     # 保存结果
     step_dir = Path(step_source_dir) if step_source_dir else None
-    save_clustering_result(clusters, output_dir, step_dir, copy_files=not skip_copy)
+    save_clustering_result(
+        clusters,
+        output_dir,
+        step_dir,
+        copy_files=not skip_copy,
+        move_files=move_step
+    )
 
     return clusters
 
@@ -474,6 +652,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=None, help="并行进程数 (默认: CPU数-1)")
     parser.add_argument("--max-count", type=int, default=None, help="最大处理文件数 (用于测试)")
     parser.add_argument("--skip-copy", action="store_true", help="跳过文件复制，只生成 json 结果")
+    parser.add_argument("--move-step", action="store_true", help="将 STEP 文件移动到簇目录")
 
     args = parser.parse_args()
 
@@ -483,7 +662,8 @@ def main():
         args.step_dir,
         args.num_workers,
         args.max_count,
-        args.skip_copy
+        args.skip_copy,
+        args.move_step
     )
 
 
