@@ -530,6 +530,7 @@ def save_clustering_result(
         print(f"  簇 {i}: {size} 个图")
 
     # 复制文件
+    missing_steps = []
     if copy_files and step_source_dir and step_source_dir.exists():
         print(f"\n{'='*60}")
         print("复制文件...")
@@ -558,6 +559,8 @@ def save_clustering_result(
                         shutil.move(str(src_file), str(dst_file))
                     else:
                         shutil.copy2(src_file, dst_file)
+                else:
+                    missing_steps.append(fn)
 
             # 复制代表文件到 result
             rep_fn = cluster[0]
@@ -569,6 +572,10 @@ def save_clustering_result(
                     dst_name = f"cluster_{idx:04d}_{src_file.name}"
                     shutil.copy2(src_file, result_dir / dst_name)
                     break
+
+        if missing_steps:
+            print(f"\n缺失 STEP 文件: {len(missing_steps)}")
+            save_json_data(output_dir / "missing_steps.json", missing_steps)
 
 
 def load_graphs_from_dir_or_json(input_path: str, max_count: int = None):

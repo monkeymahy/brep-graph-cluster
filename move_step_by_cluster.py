@@ -28,6 +28,7 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
     output_dir.mkdir(parents=True, exist_ok=True)
     result_dir = output_dir / "result"
     result_dir.mkdir(exist_ok=True)
+    missing_steps = []
 
     for cluster in clusters:
         cluster_id = cluster["cluster_id"]
@@ -40,6 +41,7 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
         for fn in cluster_files:
             src_file = find_step_file(step_dir, fn)
             if not src_file:
+                missing_steps.append(fn)
                 continue
             dst_file = cluster_dir / src_file.name
             if move_files:
@@ -53,6 +55,14 @@ def move_steps_by_clusters(clusters: List[Dict], step_dir: Path, output_dir: Pat
         if rep_path:
             dst_name = f"cluster_{cluster_id:04d}_{rep_path.name}"
             shutil.copy2(rep_path, result_dir / dst_name)
+        else:
+            missing_steps.append(rep_fn)
+
+    if missing_steps:
+        missing_path = output_dir / "missing_steps.json"
+        with open(missing_path, "w", encoding="utf8") as fp:
+            json.dump(sorted(set(missing_steps)), fp, indent=4, ensure_ascii=False)
+        print(f"Missing STEP files: {len(set(missing_steps))} (see {missing_path})")
 
 
 def main() -> None:
