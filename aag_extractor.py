@@ -167,7 +167,7 @@ class AAGExtractor:
                 "TorusFaceAttribute",
                 "FaceAreaAttribute",
                 "RationalNurbsFaceAttribute",
-                "FaceCentroidAttribute"
+                "FaceCentroidRadiusAttribute"
             ],
             "edge_attributes": [
                 "Concave edge",
@@ -206,6 +206,11 @@ class AAGExtractor:
         if self.scale_body:
             self.body = scale_solid_to_unit_box(self.body)
 
+        # 计算实体质心（用于半径/相对描述，使特征对全局旋转不变）
+        body_mass_props = GProp_GProps()
+        brepgprop_SurfaceProperties(self.body, body_mass_props)
+        self.body_centroid = np.array(body_mass_props.CentreOfMass().Coord(), dtype=np.float64)
+
         try:
             graph = face_adjacency(Solid(self.body))
         except Exception as e:
@@ -214,8 +219,13 @@ class AAGExtractor:
 
         graph_face_attr = []
         graph_face_grid = []
-        len_of_face_attr = len(self.attribute_schema["face_attributes"]) + \
-            (2 if "FaceCentroidAttribute" in self.attribute_schema["face_attributes"] else 0)
+        # 计算每个 face 属性向量的长度，兼容标量与向量属性
+        len_of_face_attr = 0
+        for attr_name in self.attribute_schema["face_attributes"]:
+            if attr_name == "FaceCentroidAttribute":
+                len_of_face_attr += 3
+            else:
+                len_of_face_attr += 1
 
         for face_idx in graph.nodes:
             face = graph.nodes[face_idx]["face"]
@@ -225,7 +235,8 @@ class AAGExtractor:
 
             if self.use_uv and self.num_srf_u and self.num_srf_v:
                 uv_grid = self.extract_face_point_grid(face)
-                assert uv_grid.shape[0] == 7
+                # 高级：现在 UV-grid 返回 (distances, normal_dot, mask)
+                assert uv_grid.shape[0] == 3
                 graph_face_grid.append(uv_grid.tolist())
 
         graph_edge_attr = []
@@ -241,7 +252,8 @@ class AAGExtractor:
 
             if self.use_uv and self.num_crv_u:
                 u_grid = self.extract_edge_point_grid(edge)
-                assert u_grid.shape[0] == 12
+                # 现在 edge grid 返回 (dist, tan_proj, left_proj, right_proj)
+                assert u_grid.shape[0] == 4
                 graph_edge_grid.append(u_grid.tolist())
 
         edges = list(graph.edges)
@@ -314,6 +326,12 @@ class AAGExtractor:
             gPt = mass_props.CentreOfMass()
             return gPt.Coord()
 
+        def centroid_radius_attribute(face):
+            mass_props = GProp_GProps()
+            brepgprop_SurfaceProperties(face, mass_props)
+            face_center = np.array(mass_props.CentreOfMass().Coord(), dtype=np.float64)
+            return float(np.linalg.norm(face_center - self.body_centroid))
+
         face_attributes = []
         for attribute in self.attribute_schema["face_attributes"]:
             if attribute == "Plane":
@@ -332,6 +350,8 @@ class AAGExtractor:
                 face_attributes.append(rational_nurbs_attribute(face))
             elif attribute == "FaceCentroidAttribute":
                 face_attributes.extend(centroid_attribute(face))
+            elif attribute == "FaceCentroidRadiusAttribute":
+                face_attributes.append(centroid_radius_attribute(face))
             else:
                 assert False, f"Unknown face attribute: {attribute}"
         return face_attributes
@@ -432,7 +452,26 @@ class AAGExtractor:
         normals = uvgrid(face, self.num_srf_u, self.num_srf_v, method="normal")
         mask = uvgrid(face, self.num_srf_u, self.num_srf_v, method="inside")
 
-        single_grid = np.concatenate([points, normals, mask], axis=2)
+        # 旋转不变表示：使用样本点到面质心的距离，以及法向与体质心-面质心向量的夹角投影
+        mass_props = GProp_GProps()
+        brepgprop_SurfaceProperties(face, mass_props)
+        face_center = np.array(mass_props.CentreOfMass().Coord(), dtype=np.float64)
+
+        rel = points - face_center  # shape (u, v, 3)
+        dists = np.linalg.norm(rel, axis=2)  # (u, v)
+
+        # 体心->面心向量
+        v_body_face = face_center - self.body_centroid
+        norm_v = np.linalg.norm(v_body_face)
+        if norm_v < 1e-12:
+            v_body_face_unit = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            v_body_face_unit = v_body_face / norm_v
+
+        # normals shape (u, v, 3)
+        dots = np.einsum('ijk,k->ij', normals, v_body_face_unit)
+
+        single_grid = np.stack([dists, dots, mask], axis=2)
         return np.transpose(single_grid, (2, 0, 1))
 
     def extract_edge_point_grid(self, edge):
@@ -442,18 +481,25 @@ class AAGExtractor:
         edge_data = EdgeDataExtractor(Edge(edge), faces_of_edge,
             num_samples=self.num_crv_u, use_arclength_params=True)
         if not edge_data.good:
-            return np.zeros((12, self.num_crv_u))
+            return np.zeros((4, self.num_crv_u))
 
-        single_grid = np.concatenate(
-            [
-                edge_data.points,
-                edge_data.tangents,
-                edge_data.left_normals,
-                edge_data.right_normals
-            ],
-            axis = 1
-        )
-        return np.transpose(single_grid, (1, 0))
+        pts = edge_data.points  # (n, 3)
+        tangents = edge_data.tangents  # (n, 3)
+        left_normals = edge_data.left_normals
+        right_normals = edge_data.right_normals
+
+        centroid = np.mean(pts, axis=0)
+        rel = pts - centroid
+        dists = np.linalg.norm(rel, axis=1)  # (n,)
+
+        # 投影切线和法向到点到质心向量的单位向量上
+        v_unit = rel / (np.linalg.norm(rel, axis=1, keepdims=True) + 1e-12)
+        tangent_proj = np.einsum('ij,ij->i', tangents, v_unit)
+        left_proj = np.einsum('ij,ij->i', left_normals, v_unit)
+        right_proj = np.einsum('ij,ij->i', right_normals, v_unit)
+
+        single_grid = np.stack([dists, tangent_proj, left_proj, right_proj], axis=0)
+        return single_grid
 
 
 def find_standardization(data):

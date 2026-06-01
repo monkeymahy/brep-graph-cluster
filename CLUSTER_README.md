@@ -17,7 +17,9 @@
 
 ```bash
 # 从 STEP 文件夹提取 AAG
-python aag_extractor.py --step-dir ./steps --output ./output --num-workers 8
+python aag_extractor.py --step_path ./steps --output ./output --num_workers 8
+
+# 说明：AAG 提取器默认现在使用旋转不变特征（例如 `FaceCentroidRadiusAttribute`）。
 ```
 
 ### 2. 运行聚簇（推荐使用大规模版本）
@@ -87,7 +89,7 @@ cluster_result/
 
 ```bash
 # 步骤1: 提取 AAG
-python aag_extractor.py --step-dir /data/steps --output /data/aag_output --num-workers 16
+python aag_extractor.py --step_path /data/steps --output /data/aag_output --num_workers 16
 
 # 步骤2: 先试运行聚簇（不复制文件）
 python graph_cluster_large.py \

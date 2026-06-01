@@ -30,6 +30,17 @@ python graph_cluster_large.py --input .\aag --output .\cluster_result --num-work
 python graph_cluster_large.py --input .\aag --output .\cluster_result --skip-copy
 ```
 
+注意：AAG 提取器现在默认使用旋转不变的特征（例如 `FaceCentroidRadiusAttribute`、网格点到面心的距离及法向投影），无须额外开关即可获得对刚体旋转不敏感的表示。
+
+如果你需要从 STEP 提取 AAG，可以用下列命令（示例）：
+
+```bash
+python aag_extractor.py --step_path ./steps --output ./aag_output --num_workers 16
+
+# 若需要显式指定自定义 schema（例如回退到旧的绝对质心表示）
+python aag_extractor.py --step_path ./steps --output ./aag_output --schema ./my_schema.json --num_workers 16
+```
+
 ## 版本说明
 
 | 版本 | 文件 | 适用场景 |

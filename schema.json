@@ -7,7 +7,7 @@
         "TorusFaceAttribute",
         "FaceAreaAttribute",
         "RationalNurbsFaceAttribute",
-        "FaceCentroidAttribute"
+        "FaceCentroidRadiusAttribute"
     ],
     "edge_attributes": [
         "Concave edge",
