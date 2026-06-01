@@ -37,6 +37,7 @@ python graph_cluster_large.py --input .\aag --output .\cluster_result --skip-cop
 | 基础版 | `graph_cluster.py` | 小规模数据 (< 1k) |
 | 优化版 | `graph_cluster_fast.py` | 中等规模 (1k-10k) |
 | 大规模版 | `graph_cluster_large.py` | **大规模 (10k+) - 推荐** |
+| 高召回版 | `graph_cluster_large_relaxed.py` | **更少漏检**，适合 AAG 数值有轻微漂移的场景 |
 
 ## 输入数据格式
 
@@ -87,6 +88,8 @@ cluster_result/
 - 多级分桶策略，避免O(n²)全量比较
 - 延迟加载，内存优化
 - 多进程并行处理
+
+如果你更在意“不要漏掉相同 AAG”，而不是极限速度，可以改用 `graph_cluster_large_relaxed.py`。这个版本会放宽分桶和属性比较条件，减少被拆散到不同桶里的情况，但桶会更大、整体更慢。
 
 | 数据规模 | 预估时间 (16核) | 内存使用 |
 |----------|-----------------|----------|
