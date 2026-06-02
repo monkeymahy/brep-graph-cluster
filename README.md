@@ -102,6 +102,16 @@ cluster_result/
 
 如果你更在意“不要漏掉相同 AAG”，而不是极限速度，可以改用 `graph_cluster_large_relaxed.py`。这个版本会放宽分桶和属性比较条件，减少被拆散到不同桶里的情况，但桶会更大、整体更慢。
 
+它现在还支持显式调节匹配容差：
+
+```bash
+# 更偏召回：适当增大 atol
+python graph_cluster_large_relaxed.py --input .\aag --output .\cluster_result --atol 3e-4
+
+# 如果你已经有一组验证集，可以继续试更大的容差
+python graph_cluster_large_relaxed.py --input .\aag --output .\cluster_result --atol 1e-3 --rtol 1e-5
+```
+
 | 数据规模 | 预估时间 (16核) | 内存使用 |
 |----------|-----------------|----------|
 | 1k       | < 1 分钟        | < 2GB    |

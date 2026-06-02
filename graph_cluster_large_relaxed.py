@@ -6,6 +6,7 @@ import argparse
 import json
 import shutil
 from collections import defaultdict
+from functools import partial
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -22,6 +23,10 @@ from graph_cluster_large import (
     save_clustering_result,
     load_graphs_from_dir_or_json,
 )
+
+
+DEFAULT_ATOL = 1e-3
+DEFAULT_RTOL = 1e-4
 
 
 def compute_relaxed_bucket_key(aag_data: Dict) -> Tuple:
@@ -61,21 +66,21 @@ def aag_to_networkx_relaxed(aag_data: Dict) -> nx.Graph:
     return G
 
 
-def node_match_relaxed(node1: Dict, node2: Dict) -> bool:
+def node_match_relaxed(node1: Dict, node2: Dict, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL) -> bool:
     """更宽松的节点属性比较，降低浮点抖动带来的漏检。"""
     a1 = np.array(node1['attr'])
     a2 = np.array(node2['attr'])
-    return np.allclose(a1, a2, atol=1e-4, rtol=1e-5)
+    return np.allclose(a1, a2, atol=atol, rtol=rtol)
 
 
-def edge_match_relaxed(edge1: Dict, edge2: Dict) -> bool:
+def edge_match_relaxed(edge1: Dict, edge2: Dict, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL) -> bool:
     """更宽松的边属性比较，降低浮点抖动带来的漏检。"""
     a1 = np.array(edge1['attr'])
     a2 = np.array(edge2['attr'])
-    return np.allclose(a1, a2, atol=1e-4, rtol=1e-5)
+    return np.allclose(a1, a2, atol=atol, rtol=rtol)
 
 
-def check_isomorphism_pair_relaxed(data1: Dict, data2: Dict) -> bool:
+def check_isomorphism_pair_relaxed(data1: Dict, data2: Dict, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL) -> bool:
     """检查一对图是否同构。"""
     try:
         if (
@@ -86,11 +91,13 @@ def check_isomorphism_pair_relaxed(data1: Dict, data2: Dict) -> bool:
 
         G1 = aag_to_networkx_relaxed(data1)
         G2 = aag_to_networkx_relaxed(data2)
+        node_match = partial(node_match_relaxed, atol=atol, rtol=rtol)
+        edge_match = partial(edge_match_relaxed, atol=atol, rtol=rtol)
         matcher = nx.isomorphism.GraphMatcher(
             G1,
             G2,
-            node_match=node_match_relaxed,
-            edge_match=edge_match_relaxed,
+            node_match=node_match,
+            edge_match=edge_match,
         )
         return matcher.is_isomorphic()
     except Exception:
@@ -128,7 +135,7 @@ def split_dir_into_buckets(input_dir: Path, max_count: Optional[int] = None) -> 
     return buckets, failed
 
 
-def process_single_bucket_uf_relaxed(task):
+def process_single_bucket_uf_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL):
     """处理单个桶，返回簇映射关系（内存模式）。"""
     bucket_items = task
 
@@ -160,7 +167,7 @@ def process_single_bucket_uf_relaxed(task):
             root_j = find(j)
             if root_i == root_j:
                 continue
-            if check_isomorphism_pair_relaxed(data_i, data_list[j]):
+            if check_isomorphism_pair_relaxed(data_i, data_list[j], atol=atol, rtol=rtol):
                 union(root_i, root_j)
 
     mapping = {}
@@ -171,7 +178,7 @@ def process_single_bucket_uf_relaxed(task):
     return mapping
 
 
-def process_single_bucket_uf_files_relaxed(task):
+def process_single_bucket_uf_files_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL):
     """处理单个桶（文件路径模式），桶内加载，避免常驻内存。"""
     bucket_items = task
     if len(bucket_items) <= 1:
@@ -218,7 +225,7 @@ def process_single_bucket_uf_files_relaxed(task):
             root_j = find(j)
             if root_i == root_j:
                 continue
-            if check_isomorphism_pair_relaxed(data_i, data_list[j]):
+            if check_isomorphism_pair_relaxed(data_i, data_list[j], atol=atol, rtol=rtol):
                 union(root_i, root_j)
 
     mapping = {}
@@ -232,7 +239,12 @@ def process_single_bucket_uf_files_relaxed(task):
     return mapping
 
 
-def cluster_graphs_large_scale(graphs_data: List[Tuple[str, Dict]], num_workers: int = None) -> List[List[str]]:
+def cluster_graphs_large_scale(
+    graphs_data: List[Tuple[str, Dict]],
+    num_workers: int = None,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
+) -> List[List[str]]:
     """高召回版大规模图聚簇主流程。"""
     if num_workers is None:
         num_workers = max(1, cpu_count() - 1)
@@ -262,11 +274,12 @@ def cluster_graphs_large_scale(graphs_data: List[Tuple[str, Dict]], num_workers:
     if work_buckets:
         if num_workers == 1:
             for bucket_items in tqdm(work_buckets, desc="处理桶"):
-                mapping = process_single_bucket_uf_relaxed(bucket_items)
+                mapping = process_single_bucket_uf_relaxed(bucket_items, atol=atol, rtol=rtol)
                 all_mappings.append(mapping)
         else:
+            worker = partial(process_single_bucket_uf_relaxed, atol=atol, rtol=rtol)
             with Pool(processes=num_workers) as pool:
-                for mapping in tqdm(pool.imap(process_single_bucket_uf_relaxed, work_buckets), total=len(work_buckets), desc="处理桶"):
+                for mapping in tqdm(pool.imap(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
                     all_mappings.append(mapping)
 
     print("\n[3/4] 合并簇...")
@@ -277,7 +290,13 @@ def cluster_graphs_large_scale(graphs_data: List[Tuple[str, Dict]], num_workers:
     return clusters
 
 
-def cluster_graphs_large_scale_from_dir(input_dir: Path, num_workers: int = None, max_count: Optional[int] = None) -> List[List[str]]:
+def cluster_graphs_large_scale_from_dir(
+    input_dir: Path,
+    num_workers: int = None,
+    max_count: Optional[int] = None,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
+) -> List[List[str]]:
     """目录模式聚簇：分桶阶段只保留路径，桶内再加载。"""
     if num_workers is None:
         num_workers = max(1, cpu_count() - 1)
@@ -318,11 +337,12 @@ def cluster_graphs_large_scale_from_dir(input_dir: Path, num_workers: int = None
     if work_buckets:
         if num_workers == 1:
             for bucket_items in tqdm(work_buckets, desc="处理桶"):
-                mapping = process_single_bucket_uf_files_relaxed(bucket_items)
+                mapping = process_single_bucket_uf_files_relaxed(bucket_items, atol=atol, rtol=rtol)
                 all_mappings.append(mapping)
         else:
+            worker = partial(process_single_bucket_uf_files_relaxed, atol=atol, rtol=rtol)
             with Pool(processes=num_workers) as pool:
-                for mapping in tqdm(pool.imap(process_single_bucket_uf_files_relaxed, work_buckets), total=len(work_buckets), desc="处理桶"):
+                for mapping in tqdm(pool.imap(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
                     all_mappings.append(mapping)
 
     print("\n[3/4] 合并簇...")
@@ -341,6 +361,8 @@ def cluster_from_graphs_json(
     max_count: Optional[int] = None,
     skip_copy: bool = False,
     move_step: bool = False,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ):
     """从 graphs_json 或目录聚簇。"""
     output_dir = Path(output_dir)
@@ -348,10 +370,10 @@ def cluster_from_graphs_json(
 
     input_path = Path(graphs_json_path)
     if input_path.is_dir():
-        clusters = cluster_graphs_large_scale_from_dir(input_path, num_workers, max_count)
+        clusters = cluster_graphs_large_scale_from_dir(input_path, num_workers, max_count, atol=atol, rtol=rtol)
     else:
         graphs_data = load_graphs_from_dir_or_json(graphs_json_path, max_count=max_count)
-        clusters = cluster_graphs_large_scale(graphs_data, num_workers)
+        clusters = cluster_graphs_large_scale(graphs_data, num_workers, atol=atol, rtol=rtol)
 
     step_dir = Path(step_source_dir) if step_source_dir else None
     save_clustering_result(
@@ -374,6 +396,8 @@ def main():
     parser.add_argument("--max-count", type=int, default=None, help="最大处理文件数 (用于测试)")
     parser.add_argument("--skip-copy", action="store_true", help="跳过文件复制，只生成 json 结果")
     parser.add_argument("--move-step", action="store_true", help="将 STEP 文件移动到簇目录")
+    parser.add_argument("--atol", type=float, default=DEFAULT_ATOL, help=f"节点/边属性的绝对容差 (默认: {DEFAULT_ATOL})")
+    parser.add_argument("--rtol", type=float, default=DEFAULT_RTOL, help=f"节点/边属性的相对容差 (默认: {DEFAULT_RTOL})")
 
     args = parser.parse_args()
 
@@ -385,6 +409,8 @@ def main():
         args.max_count,
         args.skip_copy,
         args.move_step,
+        args.atol,
+        args.rtol,
     )
 
 
