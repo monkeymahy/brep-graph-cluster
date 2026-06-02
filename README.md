@@ -120,14 +120,27 @@ python graph_cluster_large_relaxed.py --input .\aag --output .\cluster_result --
 
 ## STEP 移动/复制说明
 
-- 默认复制 STEP 到簇目录。
-- 需要节省磁盘空间时用 `--move-step` 直接移动。
-- 若希望聚类后再移动（更安全），可用后处理脚本。
+- 聚类脚本默认复制 STEP 到簇目录，需要节省磁盘空间时用 `--move-step` 直接移动。
+- 若 STEP 文件在 NAS 上，可用后处理脚本先在本机生成纯 bash 脚本，再复制到 NAS 上执行。
+- 后处理脚本默认生成移动命令，使用 `--copy-only` 可改为复制命令。
 
 ```bash
-# 根据 clusters.json 移动 STEP 到簇目录（默认移动）
-python move_step_by_cluster.py --clusters .\cluster_result\clusters.json --step-dir .\steps --output .\cluster_result
+# 生成 bash 移动脚本（默认移动）
+python move_step_by_cluster.py \
+    --clusters ./cluster_result/clusters.json \
+    --step-dir /volume1/steps \
+    --output /volume1/cluster_result
 
-# 只复制，不移动
-python move_step_by_cluster.py --clusters .\cluster_result\clusters.json --step-dir .\steps --output .\cluster_result --copy-only
+# 生成 bash 复制脚本（不移动原文件）
+python move_step_by_cluster.py \
+    --clusters ./cluster_result/clusters.json \
+    --step-dir /volume1/steps \
+    --output /volume1/cluster_result \
+    --copy-only
+
+# 复制生成的 move_step_by_cluster.sh 到 NAS 后执行
+bash move_step_by_cluster.sh
+
+# 执行前预览命令，不实际移动/复制
+DRY_RUN=1 bash move_step_by_cluster.sh
 ```
