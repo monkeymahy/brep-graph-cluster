@@ -4,37 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-Clusters B-rep CAD parts (STEP files) by geometric equivalence. Pipeline: extract an Attributed Adjacency Graph (AAG) from each STEP file, then group files whose AAGs are isomorphic. The same part at a different rigid-body rotation lands in the same cluster because AAG features are rotation-invariant by construction.
+Clusters B-rep CAD parts (STEP files) by geometric equivalence. Each STEP has already been converted to an Attributed Adjacency Graph (AAG) JSON (extraction happens elsewhere); this repo groups AAGs that are isomorphic. The same part at a different rigid-body rotation lands in the same cluster because AAG features are rotation-invariant by construction.
 
-## Two dependency tiers
+## Dependencies
 
-The repo runs in two distinct environments — do not assume one covers everything:
-
-- **Clustering tier** (lightweight): `numpy`, `networkx`, `tqdm`. All `graph_cluster*.py` scripts run here. This is the common path.
-- **Extraction tier** (heavy): `pythonocc-core`/`occt`, `occwl` (AutodeskAILab), plus `torch`/`dgl` only for `graph_loader.py`. Needed for `aag_extractor.py`, `graph_loader.py`, and `example.py`.
-
-See `INSTALL.md` for heavy-env setup, including two gotchas: **do not install `numba`** (conflicts with `tbb` pinned by `pythonocc-core=7.5.1`), and a known `vtk` metadata-corruption fix.
+Single lightweight tier: `numpy`, `networkx`, `tqdm`. No heavy env, no torch/dgl/pythonocc.
 
 ## Common commands
 
 ```bash
-# 1. Extract AAGs from STEP files (heavy env) → graphs.json + attr_stat.json
-python aag_extractor.py --step_path ./steps --output ./aag_output --num_workers 16
-#   --schema ./my_schema.json overrides the default attribute set
+# Cluster (the only clusterer). --input accepts a directory of per-file *.json
+# OR a single graphs.json. Directory input triggers the low-memory path.
+python graph_cluster.py --input ./aag --output ./cluster_result \
+    [--step-dir ./steps] [--num-workers 16] [--skip-copy] [--move-step] [--max-count N] \
+    [--atol 1e-2] [--rtol 1e-2] [--vf2-step-budget 1000000] [--timeout-isomorphic]
 
-# 2. Cluster (lightweight env). --input accepts a directory of per-file *.json
-#    OR a single graphs.json. Directory input triggers the low-memory path.
-python graph_cluster_large.py --input ./aag --output ./cluster_result \
-    [--step-dir ./steps] [--num-workers 16] [--skip-copy] [--move-step] [--max-count N]
-
-# 3. High-recall variant when the large version leaves near-duplicates unmerged.
-#    Looser bucketing (num_nodes+num_edges only) + tunable tolerances.
-python graph_cluster_large_relaxed.py --input ./aag --output ./cluster_result \
-    --atol 1e-3 --rtol 1e-4
-
-# Smoke-test extraction + loader round-trip (heavy env)
-python example.py
+# Estimate candidate-pair count and (optionally) extrapolate runtime before a full run
+python estimate_cluster_cost.py --input ./aag --atol 1e-2 --rtol 1e-2 [--calibrate 50]
 ```
+
+`--vf2-step-budget` caps per-pair VF2 feasibility checks; pairs exceeding it are treated as non-isomorphic and logged to `timed_out_pairs.json`. `--timeout-isomorphic` instead merges them (sacrifice precision for recall). `--no-prefilter` disables the lossless invariant prefilter for A/B verification.
 
 **STEP files on a NAS**: STEP files often live on a NAS this machine can't write to directly. `move_step_by_cluster.py` does NOT touch files — it reads `clusters.json` and emits a pure POSIX shell script to run on the NAS:
 
@@ -44,48 +33,37 @@ python move_step_by_cluster.py --clusters ./cluster_result/clusters.json \
 # copy the generated move_step_by_cluster.sh to the NAS, then:
 sh move_step_by_cluster.sh               # apply
 DRY_RUN=1 sh move_step_by_cluster.sh     # preview only
-
-# Rebuild result/ representatives from existing cluster_* dirs (local)
-python restore_result_from_clusters.py --output ./cluster_result [--overwrite]
 ```
 
 There are no test suites, linters, or build steps.
 
 ## Architecture
 
-### AAG extraction (`aag_extractor.py`)
-`AAGExtractor.process()` reads a STEP body via OpenCASCADE, validates it is a closed manifold `TopoDS_Solid` (`TopologyChecker`), scales it to a unit box, computes the body centroid, then builds a face-adjacency graph via `occwl.graph.face_adjacency`. Faces → nodes, face-face edges → graph edges. Per-face/per-edge attribute vectors come from `schema.json` (geometry-type flags, area/length, convexity, BSpline rationality, etc.).
+### Clustering (`graph_cluster.py`)
+Self-contained — the I/O and Union-Find helpers (`load_json`, `save_json_data`, `merge_mappings`, `mapping_to_clusters`, `save_clustering_result`, `load_graphs_from_dir_or_json`) are all inlined here (no sibling module). Argparse CLI → `cluster_from_graphs_json` → `save_clustering_result`.
 
-**Rotation invariance is the core design choice** — features are expressed relative to centroids, not absolute coordinates:
-- `FaceCentroidRadiusAttribute` = distance from face centroid to body centroid.
-- UV face grid stores `(point-to-face-centroid distance, normal·(body_centroid→face_centroid unit), inside-mask)` — 3 channels, shape `(3, U, V)`.
-- Edge grid stores `(point-to-edge-centroid distance, tangent/left-normal/right-normal projected onto point-to-centroid unit)` — 4 channels.
-
-This is why no rotation flag is needed at cluster time. `find_standardization` emits per-attr-dim mean/std (`attr_stat.json`) for optional normalization via `graph_loader.standardize_graph`.
-
-### Clustering (`graph_cluster*.py`)
-Four versions share the same shape (argparse CLI, `cluster_from_graphs_json` entry, `save_clustering_result` writer) but differ in scale strategy:
-
-| File | Scale | Strategy |
-|------|-------|----------|
-| `graph_cluster.py` | <1k | O(n²) pairwise VF2++ |
-| `graph_cluster_fast.py` | 1k–10k | md5-hash bucketed VF2++ |
-| `graph_cluster_large.py` | 10k+ (default) | multi-level bucket + Union-Find + VF2++, low-memory dir mode |
-| `graph_cluster_large_relaxed.py` | high recall | imports large's helpers, overrides bucketing + tolerances |
-
-Large version's core algorithm (`graph_cluster_large.py`):
-1. **Bucket** by a multi-level key `(num_nodes, num_edges, face_attr_mean, edge_attr_mean, face_sketch_md5, edge_sketch_md5)` so only plausibly-isomorphic graphs are compared. A sketch = sorted md5 fingerprints of rounded attribute vectors (order-invariant).
-2. **Compare within each bucket** with VF2++ (`nx.isomorphism.GraphMatcher` + `node_match`/`edge_match` using `np.allclose`). Union-Find merges matches (`process_single_bucket_uf*`).
-3. **Merge** per-bucket mappings into a global Union-Find (`merge_mappings`), then emit clusters sorted by size descending (`mapping_to_clusters`). Each cluster's representative is `files[0]`.
+Core algorithm:
+1. **Bucket** by `(num_nodes, num_edges)` (`compute_bucket_key`) so only plausibly-isomorphic graphs are compared. Loose key on purpose — avoids splitting same-part AAGs whose node/edge counts drift.
+2. **Prefilter** within each bucket with permutation-invariant, provably-lossless features: sorted degree sequence (exact) + per-dim mean/min/max/max-abs of node and edge attrs (`compute_invariant_stats` / `build_candidate_matrix`). Non-candidates are skipped without a VF2 call and never false-prune a true isomorphism. The rtol reference MUST be max-abs (attrs can be negative — CAD curvature/normals); `PREFILTER_SAFETY=2.0`.
+3. **VF2** on candidate pairs (`nx.isomorphism.GraphMatcher` + `node_match`/`edge_match` using `np.allclose` at `atol`/`rtol`). Union-Find merges matches (`process_single_bucket_uf` / `process_single_bucket_uf_files`). `_vf2_isomorphic` returns three states: `True` / `False` / `None` (None = step-budget exceeded); `--timeout-isomorphic` makes None a merge.
+4. **Merge** per-bucket mappings into a global Union-Find (`merge_mappings`), then emit clusters sorted by size descending (`mapping_to_clusters`). Each cluster's representative is `files[0]`.
 
 Two execution paths, chosen by `--input` type:
 - **Memory mode** (single `graphs.json`): loads everything once (`load_graphs_from_dir_or_json`).
-- **Dir mode** (directory of per-file JSONs, recommended for large data): bucketing keeps only file paths; each bucket re-reads its JSONs inside the worker (`process_single_bucket_uf_files`). Bounds resident memory.
+- **Dir mode** (directory of per-file JSONs, recommended for large data): bucketing keeps only file paths; each bucket re-reads its JSONs inside the worker. Bounds resident memory.
 
-The **relaxed** version reuses `merge_mappings`, `mapping_to_clusters`, `save_clustering_result`, `load_graphs_from_dir_or_json` from `graph_cluster_large` and overrides only: bucket key (just `num_nodes, num_edges`), and match tolerances (`DEFAULT_ATOL=1e-3`, `DEFAULT_RTOL=1e-4`, tunable via `--atol`/`--rtol`). Bigger buckets → slower but fewer false splits from float drift. Strict versions use `atol` 1e-6 (basic) / 1e-5 (large).
+Multiprocessing uses `pool.imap_unordered` so the progress bar advances per completed bucket (Union-Find merge is order-independent). `merge_mappings` iterates a `set()`, so representative/cluster-id ordering is not deterministic across runs (the grouping itself is deterministic).
+
+Defaults: `DEFAULT_ATOL=1e-3`, `DEFAULT_RTOL=1e-4`. The user typically runs at `1e-2`/`1e-2` for recall.
+
+### Cost estimator (`estimate_cluster_cost.py`)
+Imports `compute_bucket_key`, `compute_invariant_stats`, `build_candidate_matrix`, `_vf2_isomorphic`, etc. from `graph_cluster`. Counts candidate pairs per bucket, reports prune rate and top buckets; with `--calibrate N` samples N candidate pairs (stratified by bucket candidate count) timing VF2 under a step budget and extrapolates total time. Candidate-pair count is the reliable metric; VF2 timing has a heavy tail, so the extrapolation is only order-of-magnitude.
+
+### NAS move script (`move_step_by_cluster.py`)
+Reads `clusters.json`, emits a pure POSIX shell script. `place_cluster_file` moves/copies each STEP into `cluster_NNNN/` with its original name; `copy_representative` copies each cluster's representative to `result/` with its original name (no cluster prefix). `find_step_file` tries `.step/.stp/.STEP/.STP`. Missing files recorded to `missing_steps.txt`.
 
 ### Outputs (`save_clustering_result`)
-Writes to `--output`: `clusters.json` (id/size/representative/files), `file_mapping.json` (per-file cluster), `stats.json`, `cluster_NNNN/` dirs (copied or moved STEP files when `--step-dir` given), `result/` (cluster-prefixed representatives), and `missing_steps.json` when STEP files aren't found. `--skip-copy` writes only the JSONs (inspect results before touching files); `--move-step` moves instead of copies.
+Writes to `--output`: `clusters.json` (id/size/representative/files), `file_mapping.json` (per-file cluster), `stats.json`, `cluster_NNNN/` dirs (copied or moved STEP files when `--step-dir` given), `result/` (representatives, cluster-prefixed in the local writer), `timed_out_pairs.json` (when `--vf2-step-budget` set), and `missing_steps.json` when STEP files aren't found. `--skip-copy` writes only the JSONs; `--move-step` moves instead of copies.
 
 ### Input format
-A per-file AAG JSON (dir mode) is the data dict alone; a `graphs.json` is a list of `[filename, data]` pairs. `graph_face_attr`/`graph_edge_attr` are lists of attribute vectors; `graph_face_grid`/`graph_edge_grid` hold the rotation-invariant grids above. `_normalize_graph_item` (in both large and relaxed) accepts either form, so the same clusterer handles extractor output and hand-authored files.
+A per-file AAG JSON (dir mode) is the data dict alone; a `graphs.json` is a list of `[filename, data]` pairs. `graph_face_attr`/`graph_edge_attr` are lists of attribute vectors. `_normalize_graph_item` accepts either form. AAG features are rotation-invariant (expressed relative to centroids, not absolute coordinates), which is why no rotation flag is needed at cluster time.

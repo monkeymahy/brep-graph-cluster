@@ -1,6 +1,8 @@
 # AAG 图聚簇
 
-使用 networkx 的 VF2++ 算法对 AAG JSON 数据进行精确图匹配和聚簇。
+按几何等价性对 B-rep CAD 零件（STEP 文件）聚类：每个 STEP 先抽取一个属性邻接图（AAG），再把 AAG 同构的文件归为同一簇。同一零件的刚体旋转会落在同一簇，因为 AAG 特征按构造是旋转不变的。
+
+本仓库只做**聚簇**与**文件搬运**，AAG 抽取在别处完成（输入是已抽好的 AAG JSON）。
 
 ## 安装
 
@@ -11,49 +13,72 @@ pip install numpy tqdm networkx
 ## 快速开始
 
 ```bash
-# 使用大规模版本（推荐）- 目录模式会走低内存路径
-python graph_cluster_large.py --input E:\mhy\aagnet\v2\data\SFCAD_4\aag --output .\cluster_result
+# 聚簇（目录模式，低内存路径）。--skip-copy 只生成 JSON，不碰 STEP 文件
+python graph_cluster.py --input ./aag --output ./cluster_result --skip-copy
 
-# 或从单个 graphs.json 文件
-python graph_cluster_large.py --input .\graphs.json --output .\cluster_result
+# 带 STEP 文件复制到簇目录
+python graph_cluster.py --input ./aag --output ./cluster_result --step-dir ./steps
 
-# 带 STEP 文件复制
-python graph_cluster_large.py --input .\aag --output .\cluster_result --step-dir .\steps
-
-# 移动 STEP 文件到簇目录（替代复制）
-python graph_cluster_large.py --input .\aag --output .\cluster_result --step-dir .\steps --move-step
-
-# 多进程加速
-python graph_cluster_large.py --input .\aag --output .\cluster_result --num-workers 16
-
-# 跳过文件复制，只生成 JSON 结果（先看结果）
-python graph_cluster_large.py --input .\aag --output .\cluster_result --skip-copy
+# 多进程
+python graph_cluster.py --input ./aag --output ./cluster_result --num-workers 16
 ```
 
-注意：AAG 提取器现在默认使用旋转不变的特征（例如 `FaceCentroidRadiusAttribute`、网格点到面心的距离及法向投影），无须额外开关即可获得对刚体旋转不敏感的表示。
+### 容差
 
-如果你需要从 STEP 提取 AAG，可以用下列命令（示例）：
+AAG 属性是浮点向量，节点/边匹配用 `np.allclose`：
 
 ```bash
-python aag_extractor.py --step_path ./steps --output ./aag_output --num_workers 16
-
-# 若需要显式指定自定义 schema（例如回退到旧的绝对质心表示）
-python aag_extractor.py --step_path ./steps --output ./aag_output --schema ./my_schema.json --num_workers 16
+# 召回更高（漂移更大的“同一零件”也能合并），但更慢、更易过合并
+python graph_cluster.py --input ./aag --output ./cluster_result --atol 1e-2 --rtol 1e-2
 ```
 
-## 版本说明
+### 卡死对（VF2 指数回溯）
 
-| 版本 | 文件 | 适用场景 |
-|------|------|----------|
-| 基础版 | `graph_cluster.py` | 小规模数据 (< 1k) |
-| 优化版 | `graph_cluster_fast.py` | 中等规模 (1k-10k) |
-| 大规模版 | `graph_cluster_large.py` | **大规模 (10k+) - 推荐** |
-| 高召回版 | `graph_cluster_large_relaxed.py` | **更少漏检**，适合 AAG 数值有轻微漂移的场景 |
+大图 + 大容差时，少数近似但不同构的对会让 VF2 回溯几天。用步数预算切断：
+
+```bash
+# 每对最多 1e6 步可行性检查，超限按不同构处理并记到 timed_out_pairs.json
+python graph_cluster.py --input ./aag --output ./cluster_result \
+    --atol 1e-2 --rtol 1e-2 --vf2-step-budget 1000000
+
+# 若宁可过合并也不要漏合并，把超时对按同构处理（仍记 timed_out_pairs.json）
+python graph_cluster.py --input ./aag --output ./cluster_result \
+    --atol 1e-2 --rtol 1e-2 --vf2-step-budget 1000000 --timeout-isomorphic
+```
+
+## 预估计算量与时间
+
+正式跑前先看每个桶预过滤后的候选对数，判断大桶是“多样”（预过滤有效）还是“同族”（无损剪枝到头），并可抽样校准每对 VF2 耗时外推总时间：
+
+```bash
+python estimate_cluster_cost.py --input ./aag --atol 1e-2 --rtol 1e-2
+# 带时间外推（抽样 50 对 VF2 校准）
+python estimate_cluster_cost.py --input ./aag --atol 1e-2 --rtol 1e-2 --calibrate 50
+```
+
+候选对数是可靠指标；VF2 耗时方差大，外推仅作量级参考。
+
+## STEP 移动/复制（NAS）
+
+STEP 常在 NAS 上、本机写不了。`move_step_by_cluster.py` 不碰文件——读 `clusters.json`，生成纯 POSIX shell 脚本拷到 NAS 执行：
+
+```bash
+python move_step_by_cluster.py --clusters ./cluster_result/clusters.json \
+    --step-dir /volume1/steps --output /volume1/cluster_result [--copy-only]
+
+# 拷到 NAS 后
+sh move_step_by_cluster.sh               # 执行
+DRY_RUN=1 sh move_step_by_cluster.sh     # 仅预览
+```
+
+默认移动，`--copy-only` 改为复制。代表文件复制到 `result/`，**不带** cluster 前缀（用原文件名）。
 
 ## 输入数据格式
 
 ### 方式1：目录模式（推荐）
-每个文件是一个单独的JSON：
+
+每个文件是一个 AAG JSON：
+
 ```
 aag/
   3211C01001G70.json
@@ -61,7 +86,8 @@ aag/
   ...
 ```
 
-### 方式2：单个graphs.json
+### 方式2：单个 graphs.json
+
 ```json
 [
   [
@@ -69,78 +95,40 @@ aag/
     {
       "graph": {"edges": [[0, 0, 1], [1, 2, 2]], "num_nodes": 3},
       "graph_face_attr": [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
-      "graph_face_grid": [],
-      "graph_edge_attr": [[0.0], [1.0], [0.5]],
-      "graph_edge_grid": []
+      "graph_edge_attr": [[0.0], [1.0], [0.5]]
     }
   ]
 ]
 ```
 
+每文件 AAG JSON 即数据字典本身；`graphs.json` 是 `[filename, data]` 对的列表。两种格式同一个聚簇器都收。
+
 ## 输出目录结构
 
 ```
 cluster_result/
-├── clusters.json      # 完整的聚簇信息
-├── file_mapping.json  # 每个文件对应的簇
-├── stats.json         # 统计信息
-├── cluster_0000/      # 第1个簇（最大）
-│   ├── file1.step
-│   └── file2.step
-├── cluster_0001/      # 第2个簇
+├── clusters.json         # id/size/representative/files
+├── file_mapping.json     # 每个文件对应的簇
+├── stats.json            # 统计
+├── timed_out_pairs.json  # VF2 步数预算超时的对（仅设置 --vf2-step-budget 时）
+├── cluster_0000/         # 簇目录（带 STEP 文件时）
+├── cluster_0001/
 ├── ...
-└── result/            # 每个簇的代表文件
-    ├── cluster_0000_file1.step
-    └── cluster_0001_file3.step
+└── result/               # 每簇代表文件
 ```
 
-## 性能优化
+## 旋转不变性
 
-- 多级分桶策略，避免O(n²)全量比较
-- 延迟加载，内存优化
-- 多进程并行处理
+无需旋转标志位。AAG 特征相对质心表达，而非绝对坐标：
+- 面属性含面心到体心的距离；
+- 面网格存（点到面心距离、法向·（体心→面心单位向量）、内掩码）；
+- 边网格存（点到边心距离、切向/左右法向在点→心单位向量上的投影）。
 
-如果你更在意“不要漏掉相同 AAG”，而不是极限速度，可以改用 `graph_cluster_large_relaxed.py`。这个版本会放宽分桶和属性比较条件，减少被拆散到不同桶里的情况，但桶会更大、整体更慢。
+因此同一零件的不同刚体旋转，AAG 相同，落入同一簇。
 
-它现在还支持显式调节匹配容差：
+## 算法要点
 
-```bash
-# 更偏召回：适当增大 atol
-python graph_cluster_large_relaxed.py --input .\aag --output .\cluster_result --atol 3e-4
-
-# 如果你已经有一组验证集，可以继续试更大的容差
-python graph_cluster_large_relaxed.py --input .\aag --output .\cluster_result --atol 1e-3 --rtol 1e-5
-```
-
-| 数据规模 | 预估时间 (16核) | 内存使用 |
-|----------|-----------------|----------|
-| 1k       | < 1 分钟        | < 2GB    |
-| 10k      | 5-15 分钟       | < 8GB    |
-| 60k      | 1-2 小时        | ~32GB    |
-
-## STEP 移动/复制说明
-
-- 聚类脚本默认复制 STEP 到簇目录，需要节省磁盘空间时用 `--move-step` 直接移动。
-- 若 STEP 文件在 NAS 上，可用后处理脚本先在本机生成纯 shell 脚本，再复制到 NAS 上执行。
-- 后处理脚本默认生成移动命令，使用 `--copy-only` 可改为复制命令。
-
-```bash
-# 生成 shell 移动脚本（默认移动）
-python move_step_by_cluster.py \
-    --clusters ./cluster_result/clusters.json \
-    --step-dir /volume1/steps \
-    --output /volume1/cluster_result
-
-# 生成 shell 复制脚本（不移动原文件）
-python move_step_by_cluster.py \
-    --clusters ./cluster_result/clusters.json \
-    --step-dir /volume1/steps \
-    --output /volume1/cluster_result \
-    --copy-only
-
-# 复制生成的 move_step_by_cluster.sh 到 NAS 后执行
-sh move_step_by_cluster.sh
-
-# 执行前预览命令，不实际移动/复制
-DRY_RUN=1 sh move_step_by_cluster.sh
-```
+1. **分桶**：按 `(num_nodes, num_edges)`，只比同桶。
+2. **预过滤**：度序列精确匹配 + 节点/边属性逐维 mean/min/max/max-abs，置换不变且可证无损（不会漏掉真同构对）。`--no-prefilter` 可关闭做 A/B 验证。
+3. **VF2**：候选对用 `nx.isomorphism.GraphMatcher` + `np.allclose` 容差匹配，Union-Find 合并。
+4. **进度**：`imap_unordered`，每完成一个桶就刷新进度条（不会因某个慢桶冻住）。

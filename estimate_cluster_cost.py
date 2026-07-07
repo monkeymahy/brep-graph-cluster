@@ -18,14 +18,14 @@ from typing import Dict, List, Tuple
 import numpy as np
 from tqdm import tqdm
 
-from graph_cluster_large_relaxed import (
+from graph_cluster import (
     load_json,
     load_graphs_from_dir_or_json,
     _normalize_graph_item,
-    compute_relaxed_bucket_key,
+    compute_bucket_key,
     compute_invariant_stats,
     build_candidate_matrix,
-    aag_to_networkx_relaxed,
+    aag_to_networkx,
     _vf2_isomorphic,
 )
 from multiprocessing import cpu_count
@@ -57,7 +57,7 @@ def main():
             try:
                 d = load_json(jf)
                 fn, gd = _normalize_graph_item(jf, d)
-                key = compute_relaxed_bucket_key(gd)
+                key = compute_bucket_key(gd)
                 stats = compute_invariant_stats(gd)
                 per_graph.append((fn, key, stats, jf))
             except Exception as e:
@@ -66,7 +66,7 @@ def main():
         graphs = load_graphs_from_dir_or_json(args.input, max_count=args.max_count)
         for fn, gd in tqdm(graphs, desc="计算不变量"):
             try:
-                key = compute_relaxed_bucket_key(gd)
+                key = compute_bucket_key(gd)
                 stats = compute_invariant_stats(gd)
                 per_graph.append((fn, key, stats, gd))
             except Exception:
@@ -147,7 +147,7 @@ def main():
                     gd = _normalize_graph_item(src, load_json(src))[1]
                 else:
                     gd = src
-                G_list.append(aag_to_networkx_relaxed(gd))
+                G_list.append(aag_to_networkx(gd))
             for (i, j) in sampled_pairs:
                 t0 = time.perf_counter()
                 res = _vf2_isomorphic(G_list[i], G_list[j], args.atol, args.rtol,
