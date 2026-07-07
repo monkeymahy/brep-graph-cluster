@@ -115,7 +115,7 @@ def build_shell_script(clusters: List[Dict], step_dir: str, output_dir: str, mov
         "        return 0",
         "    }",
         "",
-        '    dst_file="$result_dir/cluster_${cluster_id}_${rep_file##*/}"',
+        '    dst_file="$result_dir/${rep_file##*/}"',
         '    if [ -f "$dst_file" ]; then',
         "        return 0",
         "    fi",
