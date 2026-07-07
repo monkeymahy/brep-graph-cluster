@@ -333,7 +333,7 @@ def split_dir_into_buckets(input_dir: Path, max_count: Optional[int] = None) -> 
     return buckets, failed
 
 
-def process_single_bucket_uf_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL, use_prefilter: bool = True, step_budget: Optional[int] = None):
+def process_single_bucket_uf_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL, use_prefilter: bool = True, step_budget: Optional[int] = None, timeout_isomorphic: bool = False):
     """处理单个桶，返回 (簇映射关系, 步数预算超时对列表)（内存模式）。"""
     bucket_items = task
 
@@ -383,6 +383,8 @@ def process_single_bucket_uf_relaxed(task, atol: float = DEFAULT_ATOL, rtol: flo
                 union(root_i, root_j)
             elif res is None:
                 timed_out.append((filenames[i], filenames[j]))
+                if timeout_isomorphic:
+                    union(root_i, root_j)
 
     mapping = {}
     for i, fn in enumerate(filenames):
@@ -392,7 +394,7 @@ def process_single_bucket_uf_relaxed(task, atol: float = DEFAULT_ATOL, rtol: flo
     return mapping, timed_out
 
 
-def process_single_bucket_uf_files_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL, use_prefilter: bool = True, step_budget: Optional[int] = None):
+def process_single_bucket_uf_files_relaxed(task, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL, use_prefilter: bool = True, step_budget: Optional[int] = None, timeout_isomorphic: bool = False):
     """处理单个桶（文件路径模式），桶内加载，避免常驻内存。返回 (映射, 超时对列表)。"""
     bucket_items = task
     if len(bucket_items) <= 1:
@@ -457,6 +459,8 @@ def process_single_bucket_uf_files_relaxed(task, atol: float = DEFAULT_ATOL, rto
                 union(root_i, root_j)
             elif res is None:
                 timed_out.append((filenames[i], filenames[j]))
+                if timeout_isomorphic:
+                    union(root_i, root_j)
 
     mapping = {}
     for i, fn in enumerate(filenames):
@@ -476,13 +480,14 @@ def cluster_graphs_large_scale(
     rtol: float = DEFAULT_RTOL,
     use_prefilter: bool = True,
     step_budget: Optional[int] = None,
+    timeout_isomorphic: bool = False,
 ) -> Tuple[List[List[str]], List[Tuple[str, str]]]:
     """高召回版大规模图聚簇主流程。返回 (簇列表, 步数预算超时对列表)。"""
     if num_workers is None:
         num_workers = max(1, cpu_count() - 1)
 
     total = len(graphs_data)
-    print(f"开始处理 {total} 个图，使用 {num_workers} 个进程，预过滤: {'开启' if use_prefilter else '关闭'}，步数预算: {step_budget if step_budget else '无限'}")
+    print(f"开始处理 {total} 个图，使用 {num_workers} 个进程，预过滤: {'开启' if use_prefilter else '关闭'}，步数预算: {step_budget if step_budget else '无限'}，超时按: {'同构' if timeout_isomorphic else '不同构'}")
 
     print("\n[1/4] 分桶（高召回模式）...")
     buckets = split_into_buckets(graphs_data)
@@ -507,13 +512,13 @@ def cluster_graphs_large_scale(
     if work_buckets:
         if num_workers == 1:
             for bucket_items in tqdm(work_buckets, desc="处理桶"):
-                mapping, timed_out = process_single_bucket_uf_relaxed(bucket_items, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+                mapping, timed_out = process_single_bucket_uf_relaxed(bucket_items, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
                 all_mappings.append(mapping)
                 all_timed_out.extend(timed_out)
         else:
-            worker = partial(process_single_bucket_uf_relaxed, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+            worker = partial(process_single_bucket_uf_relaxed, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
             with Pool(processes=num_workers) as pool:
-                for mapping, timed_out in tqdm(pool.imap(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
+                for mapping, timed_out in tqdm(pool.imap_unordered(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
                     all_mappings.append(mapping)
                     all_timed_out.extend(timed_out)
 
@@ -533,6 +538,7 @@ def cluster_graphs_large_scale_from_dir(
     rtol: float = DEFAULT_RTOL,
     use_prefilter: bool = True,
     step_budget: Optional[int] = None,
+    timeout_isomorphic: bool = False,
 ) -> Tuple[List[List[str]], List[Tuple[str, str]]]:
     """目录模式聚簇：分桶阶段只保留路径，桶内再加载。返回 (簇列表, 超时对列表)。"""
     if num_workers is None:
@@ -542,7 +548,7 @@ def cluster_graphs_large_scale_from_dir(
     if max_count:
         json_files = json_files[:max_count]
     total = len(json_files)
-    print(f"开始处理 {total} 个图（目录模式，高召回），使用 {num_workers} 个进程，预过滤: {'开启' if use_prefilter else '关闭'}，步数预算: {step_budget if step_budget else '无限'}")
+    print(f"开始处理 {total} 个图（目录模式，高召回），使用 {num_workers} 个进程，预过滤: {'开启' if use_prefilter else '关闭'}，步数预算: {step_budget if step_budget else '无限'}，超时按: {'同构' if timeout_isomorphic else '不同构'}")
 
     print("\n[1/4] 分桶（高召回模式）...")
     buckets, failed = split_dir_into_buckets(input_dir, max_count=max_count)
@@ -575,13 +581,13 @@ def cluster_graphs_large_scale_from_dir(
     if work_buckets:
         if num_workers == 1:
             for bucket_items in tqdm(work_buckets, desc="处理桶"):
-                mapping, timed_out = process_single_bucket_uf_files_relaxed(bucket_items, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+                mapping, timed_out = process_single_bucket_uf_files_relaxed(bucket_items, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
                 all_mappings.append(mapping)
                 all_timed_out.extend(timed_out)
         else:
-            worker = partial(process_single_bucket_uf_files_relaxed, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+            worker = partial(process_single_bucket_uf_files_relaxed, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
             with Pool(processes=num_workers) as pool:
-                for mapping, timed_out in tqdm(pool.imap(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
+                for mapping, timed_out in tqdm(pool.imap_unordered(worker, work_buckets), total=len(work_buckets), desc="处理桶"):
                     all_mappings.append(mapping)
                     all_timed_out.extend(timed_out)
 
@@ -605,6 +611,7 @@ def cluster_from_graphs_json(
     rtol: float = DEFAULT_RTOL,
     use_prefilter: bool = True,
     step_budget: Optional[int] = None,
+    timeout_isomorphic: bool = False,
 ):
     """从 graphs_json 或目录聚簇。"""
     output_dir = Path(output_dir)
@@ -612,15 +619,18 @@ def cluster_from_graphs_json(
 
     input_path = Path(graphs_json_path)
     if input_path.is_dir():
-        clusters, timed_out = cluster_graphs_large_scale_from_dir(input_path, num_workers, max_count, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+        clusters, timed_out = cluster_graphs_large_scale_from_dir(input_path, num_workers, max_count, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
     else:
         graphs_data = load_graphs_from_dir_or_json(graphs_json_path, max_count=max_count)
-        clusters, timed_out = cluster_graphs_large_scale(graphs_data, num_workers, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget)
+        clusters, timed_out = cluster_graphs_large_scale(graphs_data, num_workers, atol=atol, rtol=rtol, use_prefilter=use_prefilter, step_budget=step_budget, timeout_isomorphic=timeout_isomorphic)
 
     if timed_out:
         save_json_data(output_dir / "timed_out_pairs.json",
                        [{"a": a, "b": b} for a, b in timed_out])
-        print(f"\n[!] VF2 步数预算超时的对: {len(timed_out)}（已按不同构处理，见 timed_out_pairs.json，可调大 --vf2-step-budget 重跑这些对）")
+        if timeout_isomorphic:
+            print(f"\n[!] VF2 步数预算超时的对: {len(timed_out)}（已按同构合并，见 timed_out_pairs.json）")
+        else:
+            print(f"\n[!] VF2 步数预算超时的对: {len(timed_out)}（已按不同构处理，见 timed_out_pairs.json，可调大 --vf2-step-budget 重跑这些对）")
 
     step_dir = Path(step_source_dir) if step_source_dir else None
     save_clustering_result(
@@ -649,6 +659,9 @@ def main():
     parser.add_argument("--vf2-step-budget", type=int, default=None,
                         help="单对 VF2 比较的最大可行性检查步数；超限则按不同构处理并记到 timed_out_pairs.json。"
                              "用于跳过指数级回溯的卡死对（如某桶卡死不前时设置，建议从 1e6 起调）")
+    parser.add_argument("--timeout-isomorphic", action="store_true",
+                        help="VF2 步数预算超时的对按同构处理（合并）。默认按不同构（保守不合并）。"
+                             "开启会过合并（牺牲精度换速度），仅在能接受时使用")
 
     args = parser.parse_args()
 
@@ -664,6 +677,7 @@ def main():
         args.rtol,
         use_prefilter=not args.no_prefilter,
         step_budget=args.vf2_step_budget,
+        timeout_isomorphic=args.timeout_isomorphic,
     )
 
 
